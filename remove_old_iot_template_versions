@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# Function to check if a command is installed
+check_command() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "Error: $1 is not installed. Please install it and try again."
+        exit 1
+    }
+}
+
+# Function to validate input
+validate_input() {
+    if ! [[ "$1" =~ ^[0-9]+$ ]] || [ "$1" -le 0 ]; then
+        echo "Error: versions to keep must be a positive integer."
+        exit 1
+    fi
+}
+
+# Function to log messages
+log() {
+    echo "$(date +"%Y-%m-%d %H:%M:%S") - $1"
+}
+
+# Check if required commands are installed
+check_command aws
+check_command jq
+
+# Set default values
+DEFAULT_TEMPLATE_NAME=""
+DEFAULT_VERSIONS_TO_KEEP=1
+
+# Check for template name argument
+TEMPLATE_NAME="${1:-$DEFAULT_TEMPLATE_NAME}"
+
+# Set versions to keep from the argument or default to 1
+VERSIONS_TO_KEEP=${2:-$DEFAULT_VERSIONS_TO_KEEP}
+validate_input "$VERSIONS_TO_KEEP"
+
+log "Fetching latest version for template: $TEMPLATE_NAME"
+
+# Get the latest version ID
+LATEST_VERSION_ID=$(aws iot describe-provisioning-template --template-name "$TEMPLATE_NAME" 2>/dev/null | jq -r '.defaultVersionId')
+
+if [ $? -ne 0 ] || [ -z "$LATEST_VERSION_ID" ]; then
+    echo "Error: Failed to retrieve the latest version for template '$TEMPLATE_NAME'."
+    exit 1
+fi
+
+# Log message before listing versions
+log "Fetching all versions for provisioning template: $TEMPLATE_NAME"
+
+# Get all versions of the provisioning template, excluding the latest version
+ALL_VERSIONS=($(aws iot list-provisioning-template-versions --template-name "$TEMPLATE_NAME" 2>/dev/null | jq -r '.versions[] | .versionId' | sort -n))
+
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to list versions for template '$TEMPLATE_NAME'."
+    exit 1
+fi
+
+# Remove the latest version from the list
+ALL_VERSIONS=(${ALL_VERSIONS[@]/$LATEST_VERSION_ID/})
+
+# Keep the specified number of previous versions
+VERSIONS_TO_DELETE=$((${#ALL_VERSIONS[@]} - VERSIONS_TO_KEEP))
+
+# Initialize delete count
+DELETED_COUNT=0
+
+# Loop through all versions and delete those that exceed the keep limit
+for ((i=0; i<VERSIONS_TO_DELETE; i++)); do
+    VERSION_ID=${ALL_VERSIONS[i]}
+    log "Deleting provisioning template version: $VERSION_ID"
+    if aws iot delete-provisioning-template-version --template-name "$TEMPLATE_NAME" --version-id "$VERSION_ID"; then
+        ((DELETED_COUNT++))
+    else
+        echo >&2 "ERROR: Failed to delete template \"$TEMPLATE_NAME\" version $VERSION_ID."
+        echo >&2 "Command exited with status $?"
+    fi
+done
+
+# Log the results of the deletion process
+if [ "$DELETED_COUNT" -gt 0 ]; then
+    log "Deletion of old provisioning template versions completed. Deleted $DELETED_COUNT versions, keeping $VERSIONS_TO_KEEP versions."
+else
+    log "No old provisioning template versions found to delete, keeping last $VERSIONS_TO_KEEP versions."
+fi
